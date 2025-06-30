@@ -39,3 +39,6 @@ dist/
 .claude
 specs/
 tasks/
+.env
+CLAUDE.md
+GEMINI.md
