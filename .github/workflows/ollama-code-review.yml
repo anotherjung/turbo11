@@ -1,0 +1,144 @@
+name: Ollama Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  ollama-code-review:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history to compare with base branch
+
+      - name: Get changed files
+        id: changed-files
+        run: |
+          # Get the list of changed files in the PR
+          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+
+      - name: Get file diffs
+        run: |
+          # Create a comprehensive diff for review
+          echo "# Code Review Request" > review_context.md
+          echo "" >> review_context.md
+          echo "## Pull Request Information" >> review_context.md
+          echo "- **Title:** ${{ github.event.pull_request.title }}" >> review_context.md
+          echo "- **Author:** ${{ github.event.pull_request.user.login }}" >> review_context.md
+          echo "- **Base Branch:** ${{ github.event.pull_request.base.ref }}" >> review_context.md
+          echo "- **Head Branch:** ${{ github.event.pull_request.head.ref }}" >> review_context.md
+          echo "" >> review_context.md
+          echo "## Description" >> review_context.md
+          echo "${{ github.event.pull_request.body }}" >> review_context.md
+          echo "" >> review_context.md
+          echo "## Changed Files" >> review_context.md
+          
+          # Add each changed file with its diff
+          while IFS= read -r file; do
+            if [[ -f "$file" ]]; then
+              echo "" >> review_context.md
+              echo "### File: $file" >> review_context.md
+              echo "\`\`\`diff" >> review_context.md
+              git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> review_context.md
+              echo "\`\`\`" >> review_context.md
+            fi
+          done < changed_files.txt
+
+      - name: Run Ollama Code Review
+        run: |
+          # Create the review prompt
+          cat > review_prompt.txt << 'EOF'
+          You are an experienced software engineer conducting a code review. Please analyze the following pull request and provide:
+
+          1. **Overall Assessment**: Brief summary of the changes
+          2. **Code Quality**: Comments on code structure, readability, and best practices
+          3. **Potential Issues**: Any bugs, security concerns, or performance issues
+          4. **Suggestions**: Specific improvements or alternatives
+          5. **Approval Status**: Whether you'd approve, request changes, or need more info
+
+          Please be constructive and specific in your feedback. Focus on:
+          - Code correctness and logic
+          - Security vulnerabilities
+          - Performance implications
+          - Code maintainability
+          - Testing coverage (if applicable)
+          - Documentation needs
+
+          Format your response in clear markdown with proper sections.
+          EOF
+          
+          # Combine prompt with context and run Ollama review
+          {
+            cat review_prompt.txt
+            echo ""
+            echo "---"
+            echo ""
+            cat review_context.md
+          } | ollama run gemma3 > ollama_review.md
+
+      - name: Upload review as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-code-review-${{ github.event.pull_request.number }}
+          path: |
+            ollama_review.md
+            review_context.md
+            changed_files.txt
+          retention-days: 30
+
+      - name: Comment on PR with Ollama Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Prepare the comment with proper escaping
+          {
+            echo ":robot: **Ollama Code Review**"
+            echo ""
+            echo "Here's my automated code review analysis:"
+            echo ""
+            cat ollama_review.md
+            echo ""
+            echo "---"
+            echo "*This review was generated using Ollama AI. Please use human judgment for final decisions.*"
+          } > final_comment.md
+          
+          # Post the comment to the PR using GitHub API directly
+          curl -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "{\"body\": $(jq -R -s . final_comment.md)}"
+
+      - name: Handle review failures
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMENT_BODY=":warning: **Ollama Code Review Failed**
+
+          The automated code review encountered an error. Please check the workflow logs for details.
+          
+          Possible issues:
+          - Ollama service not available on runner
+          - Large diff size causing timeout
+          - Network connectivity issues
+          
+          *Manual code review recommended.*"
+          
+          # Use GitHub API directly for error comments
+          curl -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "{\"body\": $(echo "$COMMENT_BODY" | jq -R -s .)}"

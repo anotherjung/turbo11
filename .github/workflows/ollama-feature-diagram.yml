@@ -1,0 +1,96 @@
+name: Simple Feature Diagram
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  generate-feature-diagram:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR changes
+        run: |
+          # Get changed files and their diffs
+          echo "## Feature: ${{ github.event.pull_request.title }}" > feature_info.md
+          echo "" >> feature_info.md
+          echo "**Description:** ${{ github.event.pull_request.body }}" >> feature_info.md
+          echo "" >> feature_info.md
+          echo "## Changed Files:" >> feature_info.md
+          
+          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt
+          cat changed_files.txt >> feature_info.md
+          
+          echo "" >> feature_info.md
+          echo "## Code Changes:" >> feature_info.md
+          
+          # Add the actual changes (limit to reasonable size)
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD | head -200 >> feature_info.md
+
+      - name: Generate simple feature diagram
+        run: |
+          # Simple prompt focused on the feature flow
+          cat > diagram_prompt.txt << 'EOF'
+          Create a simple Mermaid sequence diagram showing how this feature works. 
+
+          Focus on:
+          - What the user does
+          - What the system does
+          - Key steps in order
+          - Any important interactions
+
+          Keep it simple and clear - just the main flow of this feature.
+
+          Format as:
+          ```mermaid
+          sequenceDiagram
+              participant User
+              participant System
+              User->>System: Does something
+              System-->>User: Returns result
+          ```
+
+          Make the diagram easy to understand for anyone reviewing the PR.
+          EOF
+          
+          # Generate the diagram
+          {
+            cat diagram_prompt.txt
+            echo ""
+            echo "---"
+            echo ""
+            cat feature_info.md
+          } | ollama run gemma3 > feature_diagram.md
+
+      - name: Comment on PR with feature diagram
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create simple comment with the diagram
+          {
+            echo "## 📊 Feature Flow Diagram"
+            echo ""
+            echo "Here's how this feature works:"
+            echo ""
+            cat feature_diagram.md
+            echo ""
+            echo "---"
+            echo "*Auto-generated diagram to help understand the feature*"
+          } > pr_comment.md
+          
+          # Post to PR
+          curl -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "{\"body\": $(jq -R -s . pr_comment.md)}"
