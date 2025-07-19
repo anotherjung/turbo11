@@ -42,3 +42,4 @@ tasks/
 .env
 CLAUDE.md
 GEMINI.md
+.vercel
